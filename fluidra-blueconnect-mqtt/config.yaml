@@ -1,5 +1,5 @@
 name: "Fluidra Blue Connect to MQTT"
-version: "1.0.0"
+version: "1.1.0"
 slug: "fluidra_blueconnect_mqtt"
 description: "Reads Blue Connect (Fluidra Connect) water measurements and publishes them to MQTT with Home Assistant discovery."
 url: "https://github.com/qdrion/fluidra-blueconnect-mqtt"
@@ -13,7 +13,7 @@ options:
   fluidra_password: ""
   pool_id: "308b19be-ae03-5f98-a48a-42ed0530960d"
   device_id: "QX25002505"
-  poll_interval_seconds: 3600
+  poll_interval_seconds: 7200
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
   mqtt_username: ""
