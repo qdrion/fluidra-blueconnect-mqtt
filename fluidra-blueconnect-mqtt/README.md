@@ -30,8 +30,8 @@ l'endpoint composant de l'API Fluidra et publie le résultat sur MQTT.
 | --- | --- |
 | `fluidra_email` | Email du compte Fluidra Pool |
 | `fluidra_password` | Mot de passe Fluidra Pool |
-| `pool_id` | Pré-rempli : `308b19be-ae03-5f98-a48a-42ed0530960d` |
-| `device_id` | Pré-rempli : `QX25002505` |
+| `pool_id` | Pré-rempli : `308b19be-ae03-5f98-a48a-42ed05xxxxxx` |
+| `device_id` | Pré-rempli : `QX2500xxxx` |
 | `poll_interval_seconds` | 3600 (1 h) par défaut |
 | `mqtt_host` | `core-mosquitto` si add-on Mosquitto officiel |
 | `mqtt_port` | 1883 |
@@ -43,7 +43,4 @@ l'endpoint composant de l'API Fluidra et publie le résultat sur MQTT.
 
 - Le compte Fluidra ne doit pas avoir le MFA activé (le bridge ne gère pas
   le challenge MFA ; rare sur les comptes Fluidra Pool standard).
-- La salinité (composant 16) est déduite ; vérifier la cohérence avec
-  l'app Fluidra et ajuster l'unité dans `bridge.py` si besoin
-  (g/L vs µS/cm).
 - Première remontée immédiate au démarrage, puis toutes les heures.
