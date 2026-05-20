@@ -3,7 +3,7 @@
 Add-on Home Assistant qui lit les mesures du Blue Connect (Fluidra Connect)
 et les publie via MQTT avec auto-discovery.
 
-Capteurs créés (device QX25002505, Blue Connect v3, piscine au sel) :
+Capteurs créés (device QX2500xxxx, Blue Connect v3, piscine au sel) :
 
 - pH (composant 13)
 - Température eau, °C (composant 12)
@@ -19,10 +19,9 @@ l'endpoint composant de l'API Fluidra et publie le résultat sur MQTT.
 
 ## Installation
 
-1. Pousser ce dépôt sur GitHub (par ex. `github.com/qdrion/fluidra-blueconnect-mqtt`).
-2. Home Assistant : Paramètres > Modules complémentaires > Boutique.
-3. Menu (3 points) > Dépôts > coller l'URL du dépôt > Ajouter.
-4. Rafraîchir, ouvrir l'add-on "Fluidra Blue Connect to MQTT", Installer.
+1. Home Assistant : Paramètres > Modules complémentaires > Boutique.
+2. Menu (3 points) > Dépôts > coller l'URL du dépôt > Ajouter.
+3. Rafraîchir, ouvrir l'add-on "Fluidra Blue Connect to MQTT", Installer.
 
 ## Configuration
 
@@ -44,3 +43,4 @@ l'endpoint composant de l'API Fluidra et publie le résultat sur MQTT.
 - Le compte Fluidra ne doit pas avoir le MFA activé (le bridge ne gère pas
   le challenge MFA ; rare sur les comptes Fluidra Pool standard).
 - Première remontée immédiate au démarrage, puis toutes les heures.
+- Il peut y avoir des erreurs 429 de throothling sur l'API, pour plus de sécurité passez le refresh d'interval à 2h
