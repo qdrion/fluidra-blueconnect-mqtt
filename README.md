@@ -42,11 +42,9 @@ the result over MQTT.
 
 ## Installation
 
-1. Push this repository to GitHub (e.g.
-   `github.com/<your-user>/fluidra-blueconnect-mqtt`).
-2. Home Assistant: Settings > Add-ons > Add-on Store.
-3. Three-dot menu > Repositories > paste the repository URL > Add.
-4. Refresh, open the "Fluidra Blue Connect to MQTT" add-on, click
+1. Home Assistant: Settings > Add-ons > Add-on Store.
+2. Three-dot menu > Repositories > paste the repository URL > Add.
+3. Refresh, open the "Fluidra Blue Connect to MQTT" add-on, click
    Install.
 
 ## Configuration
