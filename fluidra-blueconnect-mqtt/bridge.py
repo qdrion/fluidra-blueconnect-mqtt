@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Fluidra Blue Connect -> MQTT bridge (v1.1.0).
+"""Fluidra Blue Connect -> MQTT bridge (v1.2.0).
 
-v1.1.0 changes:
-  - Exponential backoff on HTTP 429 (rate limit).
-  - Throttle (delay) between component requests within a cycle.
-  - On error: KEEP the last good value (no overwrite, no 'unavailable'),
-    and expose a status sensor + last-success timestamp for a visual
-    freshness indicator on the dashboard.
+v1.2.0 changes:
+  - Reads per-component 'ts' (sensor timestamp in Unix seconds).
+  - Computes the latest sensor timestamp across components and publishes it
+    as 'last_sensor_reading' so the dashboard / automations can tell
+    whether the sensor itself is still alive (vs just the API call).
+  - Global status now also degrades / errors based on sensor staleness:
+      ok        : API ok AND latest sensor reading < 6h
+      degraded  : API limited, OR latest sensor reading 6-24h
+      error     : API error, OR latest sensor reading >= 24h
+
+v1.1.0 (kept):
+  - Exponential backoff on HTTP 429.
+  - Throttle between component requests.
+  - On error: keep last good value, expose status + last_update sensors.
 """
 
 from __future__ import annotations
@@ -34,6 +42,10 @@ USER_AGENT = (
 
 INTER_REQUEST_DELAY = 8
 BACKOFF_MINUTES = [15, 30, 60, 120]
+
+# Sensor health thresholds (hours since last sensor reading).
+SENSOR_DEGRADED_HOURS = 6
+SENSOR_ERROR_HOURS = 24
 
 SENSORS: dict[int, dict[str, Any]] = {
     13: {"key": "ph", "name": "pH", "unit": None,
@@ -71,6 +83,7 @@ BASE_TOPIC = f"fluidra/{NODE_ID}"
 AVAILABILITY_TOPIC = f"{BASE_TOPIC}/availability"
 STATUS_TOPIC = f"{BASE_TOPIC}/status"
 LASTUPDATE_TOPIC = f"{BASE_TOPIC}/last_update"
+SENSORREAD_TOPIC = f"{BASE_TOPIC}/last_sensor_reading"
 
 _running = True
 
@@ -229,6 +242,7 @@ def publish_discovery(client: mqtt.Client) -> None:
             payload["icon"] = meta["icon"]
         client.publish(cfg_topic, json.dumps(payload), retain=True)
 
+    # Etat (ok / degraded / error)
     client.publish(
         f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}_etat/config",
         json.dumps({
@@ -240,6 +254,7 @@ def publish_discovery(client: mqtt.Client) -> None:
             "device": device_block,
         }), retain=True)
 
+    # Derniere mise a jour reussie cote BRIDGE (appel API)
     client.publish(
         f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}_last_update/config",
         json.dumps({
@@ -249,6 +264,20 @@ def publish_discovery(client: mqtt.Client) -> None:
             "availability_topic": AVAILABILITY_TOPIC,
             "device_class": "timestamp",
             "icon": "mdi:clock-check",
+            "device": device_block,
+        }), retain=True)
+
+    # Dernier releve cote SONDE (timestamp 'ts' renvoye par l'API)
+    client.publish(
+        f"{DISCOVERY_PREFIX}/sensor/{NODE_ID}_last_sensor_reading/config",
+        json.dumps({
+            "name": "Dernier releve sonde",
+            "unique_id": f"fluidra_{DEVICE_ID}_last_sensor_reading",
+            "state_topic": SENSORREAD_TOPIC,
+            "availability_topic": AVAILABILITY_TOPIC,
+            "device_class": "timestamp",
+            "icon": "mdi:radar",
+            "entity_category": "diagnostic",
             "device": device_block,
         }), retain=True)
 
@@ -266,16 +295,53 @@ def extract_value(raw: Any) -> Any:
     return raw
 
 
-def poll_once(fc: FluidraClient, client: mqtt.Client) -> str:
+def extract_ts(raw: Any) -> int | None:
+    """Pull the sensor-side timestamp from a component response.
+
+    The Fluidra API embeds a Unix-epoch (seconds) timestamp in the 'ts'
+    field of each component payload. Falls back to 'timestamp' or
+    'lastUpdate' if present, in case the schema varies.
+    """
+    if not isinstance(raw, dict):
+        return None
+    for field in ("ts", "timestamp", "lastUpdate", "last_update"):
+        v = raw.get(field)
+        if v is None:
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        # Heuristic: seconds vs milliseconds.
+        if n > 10_000_000_000:  # too big for seconds -> assume ms
+            n //= 1000
+        # Sanity check (anything before 2020 is suspicious).
+        if n > 1_577_836_800:
+            return n
+    return None
+
+
+def poll_once(fc: FluidraClient, client: mqtt.Client) -> tuple[str, int | None]:
+    """Return (cycle_status, latest_sensor_ts_or_None).
+
+    cycle_status is the API-side outcome ('ok' / 'degraded' / 'error').
+    Sensor-side health is layered on top later.
+    """
     ok_count = 0
     total = len(SENSORS)
     items = list(SENSORS.items())
+    latest_ts: int | None = None
 
     for idx, (comp_id, meta) in enumerate(items):
         key = meta["key"]
         try:
             raw = fc.get_component(DEVICE_ID, comp_id)
             value = extract_value(raw)
+            ts = extract_ts(raw)
+            if ts is not None:
+                if latest_ts is None or ts > latest_ts:
+                    latest_ts = ts
+
             if value is None:
                 log.warning("Component %s (%s) returned no value",
                             comp_id, key)
@@ -291,7 +357,12 @@ def poll_once(fc: FluidraClient, client: mqtt.Client) -> str:
                 except (TypeError, ValueError):
                     out = value
                 client.publish(f"{BASE_TOPIC}/{key}", out, retain=True)
-                log.info("%s = %s", key, out)
+                if ts is not None:
+                    log.info("%s = %s (ts=%s)", key, out,
+                             datetime.fromtimestamp(ts, timezone.utc)
+                             .isoformat())
+                else:
+                    log.info("%s = %s (no ts)", key, out)
                 ok_count += 1
         except RateLimited as exc:
             log.error("%s -> aborting cycle, will back off.", exc)
@@ -307,18 +378,51 @@ def poll_once(fc: FluidraClient, client: mqtt.Client) -> str:
                 time.sleep(1)
 
     if ok_count == total:
-        return "ok"
-    if ok_count == 0:
-        return "error"
-    return "degraded"
+        cycle = "ok"
+    elif ok_count == 0:
+        cycle = "error"
+    else:
+        cycle = "degraded"
+    return cycle, latest_ts
+
+
+def combine_status(cycle: str, sensor_ts: int | None,
+                   prev_sensor_ts: int | None) -> tuple[str, int | None]:
+    """Combine API cycle outcome with sensor-side freshness.
+
+    Returns (status, effective_sensor_ts) where effective_sensor_ts is
+    the most recent we know of (current cycle or carried over).
+    """
+    effective = sensor_ts if sensor_ts is not None else prev_sensor_ts
+    sensor_status = "ok"
+    if effective is None:
+        sensor_status = "unknown"
+    else:
+        age_h = (time.time() - effective) / 3600.0
+        if age_h >= SENSOR_ERROR_HOURS:
+            sensor_status = "error"
+        elif age_h >= SENSOR_DEGRADED_HOURS:
+            sensor_status = "degraded"
+
+    # Combine, taking the worst of the two.
+    ranking = {"ok": 0, "unknown": 0, "degraded": 1, "error": 2}
+    final = max(cycle, sensor_status, key=lambda s: ranking.get(s, 0))
+    if final == "unknown":
+        final = cycle
+    return final, effective
 
 
 def publish_status(client: mqtt.Client, status: str,
-                   touch_last_update: bool) -> None:
+                   touch_last_update: bool,
+                   sensor_ts: int | None) -> None:
     client.publish(STATUS_TOPIC, status, retain=True)
     if touch_last_update:
         now_iso = datetime.now(timezone.utc).isoformat()
         client.publish(LASTUPDATE_TOPIC, now_iso, retain=True)
+    if sensor_ts is not None:
+        sensor_iso = datetime.fromtimestamp(
+            sensor_ts, timezone.utc).isoformat()
+        client.publish(SENSORREAD_TOPIC, sensor_iso, retain=True)
 
 
 def interruptible_sleep(seconds: int) -> None:
@@ -329,8 +433,10 @@ def interruptible_sleep(seconds: int) -> None:
 
 
 def main() -> None:
-    log.info("Bridge v1.1.0 starting (device=%s, pool=%s, every %ss).",
-             DEVICE_ID, POOL_ID or "n/a", POLL_INTERVAL)
+    log.info("Bridge v1.2.0 starting (device=%s, pool=%s, every %ss, "
+             "sensor thresholds %sh/%sh).",
+             DEVICE_ID, POOL_ID or "n/a", POLL_INTERVAL,
+             SENSOR_DEGRADED_HOURS, SENSOR_ERROR_HOURS)
     fc = FluidraClient(EMAIL, PASSWORD)
 
     while _running:
@@ -346,32 +452,55 @@ def main() -> None:
 
     client = build_mqtt()
     publish_discovery(client)
-    publish_status(client, "ok", touch_last_update=False)
+    publish_status(client, "ok", touch_last_update=False, sensor_ts=None)
 
     backoff_idx = 0
+    last_known_sensor_ts: int | None = None
 
     while _running:
         start = time.time()
         try:
-            status = poll_once(fc, client)
+            cycle, sensor_ts = poll_once(fc, client)
+            status, effective_ts = combine_status(
+                cycle, sensor_ts, last_known_sensor_ts)
+            if effective_ts is not None:
+                last_known_sensor_ts = effective_ts
             publish_status(client, status,
-                           touch_last_update=(status != "error"))
+                           touch_last_update=(cycle != "error"),
+                           sensor_ts=last_known_sensor_ts)
             client.publish(AVAILABILITY_TOPIC, "online", retain=True)
-            backoff_idx = 0
+            if cycle != "error":
+                backoff_idx = 0  # reset only on API-side success
+            if last_known_sensor_ts is not None:
+                age_h = (time.time() - last_known_sensor_ts) / 3600.0
+                log.info("Cycle=%s, sensor status -> overall=%s "
+                         "(last sensor reading %.1fh ago)",
+                         cycle, status, age_h)
+            else:
+                log.info("Cycle=%s, overall=%s (no sensor ts yet)",
+                         cycle, status)
             elapsed = int(time.time() - start)
             interruptible_sleep(max(5, POLL_INTERVAL - elapsed))
         except RateLimited:
-            publish_status(client, "degraded", touch_last_update=False)
+            # API limit: keep current values, mark degraded (API).
+            # Sensor freshness is reassessed against what we know.
+            status, effective_ts = combine_status(
+                "degraded", None, last_known_sensor_ts)
+            publish_status(client, status, touch_last_update=False,
+                           sensor_ts=effective_ts)
             client.publish(AVAILABILITY_TOPIC, "online", retain=True)
             wait_min = BACKOFF_MINUTES[
                 min(backoff_idx, len(BACKOFF_MINUTES) - 1)]
             backoff_idx += 1
             log.warning("Rate limited (429). Backing off %d min "
-                        "(values kept).", wait_min)
+                        "(values kept, overall=%s).", wait_min, status)
             interruptible_sleep(wait_min * 60)
         except Exception as exc:
             log.error("Poll cycle error: %s", exc)
-            publish_status(client, "error", touch_last_update=False)
+            status, effective_ts = combine_status(
+                "error", None, last_known_sensor_ts)
+            publish_status(client, status, touch_last_update=False,
+                           sensor_ts=effective_ts)
             interruptible_sleep(300)
 
     log.info("Stopping: marking offline and disconnecting.")
